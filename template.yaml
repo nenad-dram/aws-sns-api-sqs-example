@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: aws-publisher-subscriber-pattern (uksb-1tthgi812) (tag:lambda-sns-lambda-sam-java)
+
+Globals:
+  Function:
+    Runtime: java21
+    MemorySize: 512
+
+Resources:
+  ItemsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: items-queue
+
+  ItemPublisher:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ItemPublisher
+      Handler: com.endyary.function.ItemPublisher::handleRequest
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt ItemsTopic.TopicName
+      Environment:
+        Variables:
+          ITEM_TOPIC_ARN: !Ref ItemsTopic
+
+  ItemSubscriber:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ItemSubscriber
+      Handler: com.endyary.function.ItemSubscriber::handleRequest
+      Events:
+        SNSEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref ItemsTopic
+
+  ItemsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ItemsTopic
+      Subscription:
+        - Protocol: sqs
+          Endpoint: !GetAtt ItemsQueue.Arn
+        - Protocol: lambda
+          Endpoint: !GetAtt ItemSubscriber.Arn
+
+  ItemsApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          title: !Ref AWS::StackName
+        paths:
+          /send-item:
+            post:
+              parameters:
+                - name: "Content-Type"
+                  in: "header"
+                  schema:
+                    type: "string"
+              responses:
+                "200":
+                  description: "200 response"
+                  content:
+                    application/json:
+                      schema:
+                        $ref: "#/components/schemas/Empty"
+              x-amazon-apigateway-integration:
+                uri: !Sub
+                  - arn:aws:apigateway:${AWS::Region}:sns:path//?Action=Publish&TopicArn=${SnsTopicArn}
+                  - SnsTopicArn: !Ref ItemsTopic
+                requestParameters:
+                  integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+                requestTemplates:
+                  application/json: "#set($inputRoot = $input.path('$'))\nMessage=$util.urlEncode($input.body)"
+                responses:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: when_no_templates
+                httpMethod: POST
+                type: aws
+                credentials: !GetAtt ApiSnsRole.Arn
+        components:
+          schemas:
+            Empty:
+              title: "Empty Schema"
+              type: "object"
+
+  ApiSnsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApiGatewaySNSPublishPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ItemsTopic
+
+  SnsToSqsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: "sns.amazonaws.com"
+          Resource: !GetAtt ItemsQueue.Arn
+          Action: SQS:SendMessage
+          Condition:
+            ArnEquals:
+              aws:SourceArn: !Ref ItemsTopic
+      Queues:
+        - !Ref ItemsQueue
